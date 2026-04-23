@@ -71,19 +71,85 @@ REQUEST_TIMEOUT = 15.0       # lower than the main scraper — we're probing lot
 DEFAULT_CONCURRENCY = 6
 PAGE_SIZE = 1000             # rows per Supabase query page
 
-# Tried in order if homepage autodiscovery finds nothing. We kept this list
-# short on purpose — every path here costs one HTTP roundtrip per entity, and
-# hammering a host with 10+ requests back-to-back tends to trigger WAF rate
-# limits (429s) that can then mask real feeds. These five cover WordPress,
-# generic XML, Shopify, and static-site generators — which is ≥90% of the
-# fashion / e-commerce CMSes we'll encounter.
+# Tried in order if homepage autodiscovery finds nothing. Keep short: every
+# path here costs one HTTP roundtrip per entity, and hammering a host with
+# 10+ requests back-to-back tends to trigger WAF rate limits (429s) that
+# then mask real feeds.
 FALLBACK_PATHS: tuple[str, ...] = (
     "/feed/",                 # WordPress (most common)
     "/rss",                   # generic
     "/rss.xml",               # generic XML
-    "/blogs/news.atom",       # Shopify
+    "/blogs/news.atom",       # Shopify default blog
+    "/blogs/all.atom",        # Shopify "all posts" aggregator
     "/atom.xml",              # Hugo / Jekyll / misc
 )
+
+# Extra paths dispatched only when we can identify the CMS from the homepage's
+# <meta name="generator"> tag. Targeted probes → fewer 429s, higher hit rate.
+CMS_EXTRA_PATHS: dict[str, tuple[str, ...]] = {
+    "wordpress": ("/blog/feed/", "/news/feed/", "/category/news/feed/"),
+    "shopify":   ("/blogs/news.atom", "/blogs/all.atom"),
+    "ghost":     ("/rss/",),
+    "hubspot":   ("/blog/rss.xml", "/blog/feed"),
+    "squarespace": ("/blog?format=rss",),
+    "webflow":   ("/blog/feed.xml", "/feed.xml"),
+    "drupal":    ("/rss.xml", "/node/feed"),
+}
+
+# Matched case-insensitively against <meta name="generator" content="..."> to
+# pick a CMS bucket. Order matters (first match wins) so put narrower matches
+# first.
+CMS_GENERATOR_SIGNATURES: tuple[tuple[str, str], ...] = (
+    ("hubspot",    "hubspot"),
+    ("squarespace","squarespace"),
+    ("shopify",    "shopify"),
+    ("wordpress",  "wordpress"),
+    ("wordpress",  "wp-"),
+    ("ghost",      "ghost"),
+    ("webflow",    "webflow"),
+    ("drupal",     "drupal"),
+)
+
+# If a candidate URL contains any of these fragments, it's a product / catalog
+# feed (Shopify products.rss, WooCommerce collection feeds, etc.) — treat as
+# not-a-news-feed regardless of whether it parses as XML with entries.
+PRODUCT_URL_HINTS: tuple[str, ...] = (
+    "/products.rss",
+    "/products.atom",
+    "/collections/",
+    "/shop/feed",
+    "/product-feed",
+    "/catalog/feed",
+    "/wc-product-feed",
+)
+
+# Channel <title> / <description> keywords that mark a feed as product/
+# catalog rather than news. Matched case-insensitively.
+PRODUCT_TITLE_HINTS: tuple[str, ...] = (
+    "product catalog",
+    "product feed",
+    "products feed",
+    "shop feed",
+    "store products",
+    "all products",
+    "product rss",
+    "merchant feed",
+    "all collections",
+)
+
+# Anchor-text / href patterns suggesting a "blog" or "news" page when no feed
+# is found. Lower-cased match; first match wins. Used both to surface feed-
+# like anchor hrefs and to capture blog URLs for fs_discovered_blogs.
+BLOG_PATH_KEYWORDS: tuple[str, ...] = (
+    "/blog", "/news", "/stories", "/journal", "/editorial",
+    "/press", "/updates", "/posts", "/articles", "/magazine",
+)
+
+# Public feed-discovery service we fall back to when every direct probe has
+# failed. It's free and open but not infinite — only call when the homepage
+# loaded 200, direct probes didn't return 429, and no anchor-scan feed was
+# found. See https://feedsearch.dev .
+FEEDSEARCH_ENDPOINT = "https://feedsearch.dev/api/v1/search"
 
 # How many 429s we'll tolerate from a single host before giving up on it.
 # Once a host is rate-limiting us, further probes are just noise.
@@ -117,7 +183,22 @@ class Entity:
 class FoundFeed:
     url: str
     channel: dict[str, Any]   # parsed feedparser channel fields
-    source: str               # "autodiscovery" | path string that worked
+    source: str               # "autodiscovery" | path | "anchor" | "feedsearch"
+
+
+@dataclass
+class DiscoveryResult:
+    """Everything we learned about one entity during probing.
+
+    Either `feed` is set (success), or `blog_url` is set (site has a blog
+    but no feed — candidate for the HTML-scraping pipeline), or neither
+    (no feed and no obvious blog).
+    """
+    feed: FoundFeed | None = None
+    blog_url: str | None = None
+    blog_detected_via: str | None = None
+    rate_limited: bool = False
+    rejected_product: bool = False
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -199,21 +280,178 @@ def looks_like_feed(body: bytes) -> bool:
     )
 
 
-def validate_feed(body: bytes) -> dict[str, Any] | None:
-    """Parse as RSS/Atom. Returns the channel dict if it has ≥1 entry with
-    a non-empty link, else None."""
+def _looks_like_product_feed(
+    url: str, channel: dict[str, Any], entries: list[dict]
+) -> bool:
+    """Heuristics for rejecting product/catalog feeds that happen to parse
+    as valid RSS. We want news/blog/editorial feeds only."""
+    low_url = url.lower()
+    if any(h in low_url for h in PRODUCT_URL_HINTS):
+        return True
+    title_blob = " ".join(
+        (channel.get(k) or "") for k in ("title", "description", "subtitle")
+    ).lower()
+    if any(h in title_blob for h in PRODUCT_TITLE_HINTS):
+        return True
+    # Entry-link analysis: if most entries point into /products/ or
+    # /collections/, it's a catalog disguised as an RSS feed.
+    links = [(e.get("link") or "").lower() for e in entries[:20] if e.get("link")]
+    if links:
+        product_links = sum(
+            1 for l in links
+            if "/products/" in l or "/collections/" in l or "/shop/" in l
+        )
+        if product_links / len(links) > 0.6:
+            return True
+    # Absence of dates across many entries is a weak signal for catalogs,
+    # but we don't reject on that alone — some small blogs skip dates.
+    return False
+
+
+def validate_feed(
+    body: bytes, url: str | None = None
+) -> tuple[dict[str, Any] | None, bool]:
+    """Parse `body` as RSS/Atom. Returns a tuple:
+      (channel_dict_or_None, is_product_feed)
+
+    channel_dict is populated only if the body parses, has ≥1 entry with
+    a link, AND doesn't match product-feed heuristics.
+    is_product_feed is True when we parsed a valid feed but rejected it
+    for being a product/catalog feed — the caller can count these
+    separately for reporting."""
     if not body or not looks_like_feed(body):
-        return None
+        return None, False
     try:
         parsed = feedparser.parse(body)
     except Exception:  # noqa: BLE001
-        return None
+        return None, False
     entries = parsed.get("entries") or []
     if not entries:
-        return None
+        return None, False
     if not any((e.get("link") or "").strip() for e in entries):
+        return None, False
+    channel = dict(parsed.get("feed") or {})
+    if url and _looks_like_product_feed(url, channel, list(entries)):
+        return None, True
+    return channel, False
+
+
+_GENERATOR_RX = re.compile(
+    r'<meta[^>]+name=["\']generator["\'][^>]*?content=["\']([^"\']+)',
+    re.IGNORECASE,
+)
+_GENERATOR_REV_RX = re.compile(
+    r'<meta[^>]+content=["\']([^"\']+)["\'][^>]*?name=["\']generator["\']',
+    re.IGNORECASE,
+)
+
+
+def detect_cms(html: str) -> str | None:
+    """Look at the homepage HTML for a CMS fingerprint. Used to dispatch
+    additional targeted feed-path probes."""
+    m = _GENERATOR_RX.search(html) or _GENERATOR_REV_RX.search(html)
+    if not m:
+        # Shopify ships a global `Shopify` JS object; fingerprint on that too.
+        low = html[:20000].lower()
+        if "shopify" in low and "cdn.shopify.com" in low:
+            return "shopify"
+        if "wp-content/" in low or "wp-includes/" in low:
+            return "wordpress"
+        if "ghost.io" in low or '"ghost"' in low:
+            return "ghost"
         return None
-    return dict(parsed.get("feed") or {})
+    gen = m.group(1).lower()
+    for cms, hint in CMS_GENERATOR_SIGNATURES:
+        if hint in gen:
+            return cms
+    return None
+
+
+_ANCHOR_RX = re.compile(r'<a[^>]+href=["\']([^"\']+)', re.IGNORECASE)
+
+
+def scan_anchor_feeds(html: str, base_url: str) -> list[str]:
+    """Scan the homepage for <a href> values that look like feed URLs
+    (end in .rss / .atom / .xml under a feed-ish path, or contain '/feed'
+    or '/rss' as a path segment). Catches sites that don't emit autodiscovery
+    links but do have a visible 'RSS' button in the footer."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in _ANCHOR_RX.finditer(html):
+        href = m.group(1).strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        low = href.lower()
+        looks_feedish = (
+            low.endswith((".rss", ".atom"))
+            or low.endswith("/feed") or low.endswith("/feed/")
+            or low.endswith("/rss") or low.endswith("/rss.xml")
+            or "/feed/" in low or "rss.xml" in low or ".atom" in low
+        )
+        if not looks_feedish:
+            continue
+        full = absolutise(href, base_url)
+        if full in seen:
+            continue
+        seen.add(full)
+        out.append(full)
+    return out
+
+
+def find_blog_link(html: str, base_url: str) -> str | None:
+    """Scan the homepage for the first anchor whose href points at a blog/
+    news/journal page (by path keyword). Used as a soft-signal for entities
+    that publish content but don't expose RSS."""
+    base_host = urlparse(base_url).netloc.lower()
+    for m in _ANCHOR_RX.finditer(html):
+        href = m.group(1).strip()
+        if not href or href.startswith(("#", "javascript:", "mailto:", "tel:")):
+            continue
+        low = href.lower()
+        if not any(k in low for k in BLOG_PATH_KEYWORDS):
+            continue
+        full = absolutise(href, base_url)
+        # Only accept same-host links — external "blog" links are noise.
+        if urlparse(full).netloc.lower() != base_host:
+            continue
+        # Skip deep product/collection paths that happened to contain /news
+        # in a slug, etc.
+        if any(h in low for h in PRODUCT_URL_HINTS):
+            continue
+        return full
+    return None
+
+
+async def feedsearch_fallback(
+    client: httpx.AsyncClient, homepage_host: str, already_tried: set[str],
+) -> str | None:
+    """Ask feedsearch.dev to check if the host has any feeds we missed.
+
+    Returns the first URL it reports that isn't already in `already_tried`.
+    Only the URL — the caller is responsible for validating the feed.
+    Silent on 429/timeout/5xx — we're not paying customers and this is a
+    best-effort fallback."""
+    try:
+        r = await client.get(
+            FEEDSEARCH_ENDPOINT,
+            params={"url": homepage_host},
+            timeout=REQUEST_TIMEOUT,
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    if r.status_code != 200:
+        return None
+    try:
+        data = r.json()
+    except Exception:  # noqa: BLE001
+        return None
+    if not isinstance(data, list):
+        return None
+    for row in data:
+        url = (row or {}).get("url")
+        if isinstance(url, str) and url not in already_tried:
+            return url
+    return None
 
 
 @dataclass
@@ -221,6 +459,7 @@ class ProbeResult:
     channel: dict[str, Any] | None
     rate_limited: bool = False
     redirected_to_homepage: bool = False
+    was_product: bool = False
 
 
 def _same_page(a: str, b: str) -> bool:
@@ -239,13 +478,17 @@ async def try_feed_url(
     url: str,
     homepage_final: str | None = None,
 ) -> ProbeResult:
-    """Fetch one candidate URL. Returns ProbeResult with:
-      - `channel`: parsed feed channel if URL is a real feed
+    """Fetch one candidate URL. Returns a ProbeResult:
+      - `channel`: parsed feed channel if URL is a real *news* feed
       - `rate_limited`: True if the host 429'd us
-      - `redirected_to_homepage`: True if the request followed a redirect
-        back to the homepage (very common on SPAs that catchall-route
-        unknown paths to `/`); means the host doesn't expose this path
-        and further probes are unlikely to yield anything better."""
+      - `redirected_to_homepage`: True if the fetch resolved back to the
+        homepage (catchall-routed SPA); signals no point probing more
+      - `was_product`: True if it parsed but matched product-feed hints;
+        counted separately so we know why we rejected it."""
+    # Skip product-URL-shaped paths before paying the network round-trip.
+    if any(h in url.lower() for h in PRODUCT_URL_HINTS):
+        return ProbeResult(channel=None, was_product=True)
+
     try:
         r = await client.get(
             url,
@@ -261,29 +504,36 @@ async def try_feed_url(
         return ProbeResult(channel=None, rate_limited=True)
     if r.status_code != 200 or not r.content:
         return ProbeResult(channel=None)
-
-    # If we landed on the homepage (URL redirected back, or the response is
-    # obviously an HTML landing page), treat as "no feed here" and signal
-    # the caller to skip the rest of the fallbacks.
     if homepage_final and _same_page(str(r.url), homepage_final):
         return ProbeResult(channel=None, redirected_to_homepage=True)
 
-    channel = validate_feed(r.content)
-    return ProbeResult(channel=channel)
+    channel, was_product = validate_feed(r.content, url=str(r.url))
+    return ProbeResult(channel=channel, was_product=was_product)
 
 
 async def discover_for_website(
-    client: httpx.AsyncClient, homepage: str, sem: asyncio.Semaphore
-) -> FoundFeed | None:
-    """Try autodiscovery first, then common fallback paths. Returns the
-    first candidate that validates, or None.
+    client: httpx.AsyncClient,
+    homepage: str,
+    sem: asyncio.Semaphore,
+    use_feedsearch: bool = True,
+) -> DiscoveryResult:
+    """Full discovery pipeline for one homepage URL.
 
-    Aborts early on a single host when:
-      - the host returned 429 (rate limiting — further probes make it worse)
-      - a fallback probe resolved back to the homepage (the host's
-        catchall router is swallowing unknown paths, so subsequent
-        fallbacks will too)"""
-    # 1. Homepage fetch for autodiscovery.
+    Order of operations:
+      1. Fetch homepage (browser UA).
+      2. Collect candidates from, in order:
+           - <link rel="alternate" type="application/rss+xml">
+           - <a href> anchors that look feed-shaped
+           - CMS-specific extra paths (if generator detected)
+           - generic FALLBACK_PATHS
+      3. Probe each candidate. First validated wins.
+      4. Early-abort on: 429 from host, probe resolved to homepage.
+      5. If no feed: ask feedsearch.dev as last resort (same-origin only).
+      6. If still no feed: scan anchors for a blog/news page link. Return
+         that as `blog_url` for the HTML-scraping pipeline to handle."""
+    result = DiscoveryResult()
+
+    # 1. Homepage fetch ------------------------------------------------
     try:
         async with sem:
             r = await client.get(
@@ -293,26 +543,39 @@ async def discover_for_website(
                 follow_redirects=True,
             )
     except Exception:  # noqa: BLE001
-        return None
+        return result
     if r.status_code == 429:
+        result.rate_limited = True
         log.debug("[%s] homepage 429 — skipping", homepage)
-        return None
+        return result
     if r.status_code != 200 or not r.text:
-        return None
+        return result
 
+    html = r.text
     final_base = str(r.url)
-    candidates: list[tuple[str, str]] = []  # (url, source_label)
-    for href in parse_autodiscovery(r.text, final_base):
-        candidates.append((href, "autodiscovery"))
-
-    # 2. Fallback paths from the final_base origin.
     pb = urlparse(final_base)
     origin = f"{pb.scheme}://{pb.netloc}"
+
+    # 2. Build candidate list ------------------------------------------
+    candidates: list[tuple[str, str]] = []  # (url, source_label)
+    for href in parse_autodiscovery(html, final_base):
+        candidates.append((href, "autodiscovery"))
+    for href in scan_anchor_feeds(html, final_base):
+        candidates.append((href, "anchor"))
+
+    cms = detect_cms(html)
+    if cms and cms in CMS_EXTRA_PATHS:
+        for path in CMS_EXTRA_PATHS[cms]:
+            candidates.append((origin + path, f"{cms}:{path}"))
+
     for path in FALLBACK_PATHS:
         candidates.append((origin + path, path))
 
+    # 3. Probe candidates ----------------------------------------------
     seen: set[str] = set()
     rate_limit_count = 0
+    saw_rate_limit = False
+    saw_product = False
     for url, source in candidates:
         if url in seen:
             continue
@@ -320,19 +583,46 @@ async def discover_for_website(
         async with sem:
             probe = await try_feed_url(client, url, homepage_final=final_base)
         if probe.channel is not None:
-            return FoundFeed(url=url, channel=probe.channel, source=source)
+            result.feed = FoundFeed(url=url, channel=probe.channel, source=source)
+            return result
+        if probe.was_product:
+            saw_product = True
+            # Keep trying other candidates — product-URL-shaped path doesn't
+            # mean the site has no news feed.
+            continue
         if probe.redirected_to_homepage:
-            # Any further fallback path will also get caught by the same
-            # catchall. No point continuing.
-            log.debug("[%s] %s redirected back to homepage, aborting probes",
-                      origin, source)
-            return None
+            log.debug("[%s] %s → homepage, aborting further probes", origin, source)
+            break
         if probe.rate_limited:
+            saw_rate_limit = True
             rate_limit_count += 1
             if rate_limit_count > MAX_429_PER_HOST:
-                log.debug("[%s] too many 429s, aborting probes", origin)
-                return None
-    return None
+                log.debug("[%s] too many 429s, aborting further probes", origin)
+                break
+
+    # 4. feedsearch.dev fallback ---------------------------------------
+    # Only when the host was reachable, didn't rate-limit, and direct
+    # probes found nothing. We cap this with a short additional timeout.
+    if use_feedsearch and not saw_rate_limit:
+        fallback_url = await feedsearch_fallback(client, origin, seen)
+        if fallback_url:
+            async with sem:
+                probe = await try_feed_url(client, fallback_url, homepage_final=final_base)
+            if probe.channel is not None:
+                result.feed = FoundFeed(
+                    url=fallback_url, channel=probe.channel, source="feedsearch"
+                )
+                return result
+
+    # 5. No feed — look for a blog/news page we could scrape later ----
+    blog_url = find_blog_link(html, final_base)
+    if blog_url:
+        result.blog_url = blog_url
+        result.blog_detected_via = "anchor_scan"
+
+    result.rate_limited = saw_rate_limit
+    result.rejected_product = saw_product and result.feed is None
+    return result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -475,6 +765,27 @@ def writeback_brand_rss(sb: Client, brand_id: str, feed_url: str) -> None:
         log.warning("writeback fs_brands.rss_feed_url failed for %s: %s", brand_id, e)
 
 
+def record_blog_discovery(
+    sb: Client, entity: Entity, blog_url: str, detected_via: str,
+) -> None:
+    """Upsert into fs_discovered_blogs — for entities that have a blog page
+    but no RSS feed. Re-runs just refresh `last_checked_at`."""
+    try:
+        sb.table("fs_discovered_blogs").upsert(
+            {
+                "entity_kind": entity.kind,
+                "entity_id": entity.id,
+                "blog_url": blog_url,
+                "detected_via": detected_via,
+                "last_checked_at": datetime.now(timezone.utc).isoformat(),
+            },
+            on_conflict="entity_kind,entity_id",
+        ).execute()
+    except Exception as e:  # noqa: BLE001
+        log.warning("record_blog_discovery failed for %s %s: %s",
+                    entity.kind, entity.id, e)
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Main driver
 # ──────────────────────────────────────────────────────────────────────────────
@@ -486,34 +797,58 @@ async def process_entity(
     sem: asyncio.Semaphore,
     counters: dict[str, int],
     dry_run: bool,
+    use_feedsearch: bool,
 ) -> None:
     homepage = normalise_website(entity.website)
     if not homepage:
         counters["invalid_url"] += 1
         return
 
-    found = await discover_for_website(client, homepage, sem)
-    if not found:
-        counters["no_feed"] += 1
+    result = await discover_for_website(
+        client, homepage, sem, use_feedsearch=use_feedsearch,
+    )
+
+    # Three terminal states: feed found, blog-only, or nothing.
+    if result.feed is not None:
+        found = result.feed
+        counters["found"] += 1
+        if found.source == "feedsearch":
+            counters["found_via_feedsearch"] += 1
+        elif found.source == "anchor":
+            counters["found_via_anchor"] += 1
+        log.info("[%s:%s] feed found via %s: %s",
+                 entity.kind, entity.name[:40], found.source, found.url)
+
+        if dry_run or sb is None:
+            counters["dry_skip_write"] += 1
+            return
+
+        feed_id = upsert_fs_feed(sb, found, entity)
+        if not feed_id:
+            counters["write_failed"] += 1
+            return
+        link_entity(sb, feed_id, entity)
+        if entity.kind == "brand":
+            writeback_brand_rss(sb, entity.id, found.url)
+        counters["written"] += 1
         return
 
-    counters["found"] += 1
-    log.info("[%s:%s] feed found via %s: %s",
-             entity.kind, entity.name[:40], found.source, found.url)
-
-    if dry_run or sb is None:
-        counters["dry_skip_write"] += 1
+    if result.blog_url:
+        counters["blog_only"] += 1
+        log.info("[%s:%s] no feed, but has blog: %s",
+                 entity.kind, entity.name[:40], result.blog_url)
+        if dry_run or sb is None:
+            return
+        record_blog_discovery(sb, entity, result.blog_url,
+                              result.blog_detected_via or "anchor_scan")
         return
 
-    feed_id = upsert_fs_feed(sb, found, entity)
-    if not feed_id:
-        counters["write_failed"] += 1
-        return
-
-    link_entity(sb, feed_id, entity)
-    if entity.kind == "brand":
-        writeback_brand_rss(sb, entity.id, found.url)
-    counters["written"] += 1
+    # Nothing useful at this homepage.
+    if result.rate_limited:
+        counters["rate_limited"] += 1
+    if result.rejected_product:
+        counters["rejected_product"] += 1
+    counters["no_feed"] += 1
 
 
 async def run(args: argparse.Namespace) -> int:
@@ -541,11 +876,20 @@ async def run(args: argparse.Namespace) -> int:
         log.info("nothing to do")
         return 0
 
-    log.info("probing %d entit(ies) with concurrency=%d", len(entities), args.concurrency)
+    log.info("probing %d entit(ies) with concurrency=%d%s",
+             len(entities), args.concurrency,
+             "" if args.use_feedsearch else " (feedsearch.dev fallback: OFF)")
 
     sem = asyncio.Semaphore(args.concurrency)
-    counters = {"found": 0, "no_feed": 0, "invalid_url": 0,
-                "written": 0, "write_failed": 0, "dry_skip_write": 0}
+    counters = {
+        "found": 0, "no_feed": 0, "invalid_url": 0,
+        "written": 0, "write_failed": 0, "dry_skip_write": 0,
+        "blog_only": 0,
+        "rejected_product": 0,
+        "rate_limited": 0,
+        "found_via_feedsearch": 0,
+        "found_via_anchor": 0,
+    }
     start = datetime.now(timezone.utc)
 
     async with httpx.AsyncClient(
@@ -554,7 +898,8 @@ async def run(args: argparse.Namespace) -> int:
         headers={"User-Agent": BROWSER_UA},
     ) as client:
         tasks = [
-            process_entity(e, client, sb, sem, counters, args.dry_run)
+            process_entity(e, client, sb, sem, counters,
+                           args.dry_run, args.use_feedsearch)
             for e in entities
         ]
         # Chunk progress every 25 so long runs don't look stuck.
@@ -563,25 +908,32 @@ async def run(args: argparse.Namespace) -> int:
             chunk = tasks[i : i + 25]
             await asyncio.gather(*chunk, return_exceptions=True)
             done += len(chunk)
-            log.info("progress: %d / %d  (found=%d, no_feed=%d, written=%d)",
+            log.info("progress: %d / %d  (feed=%d, blog=%d, nothing=%d)",
                      done, len(entities),
-                     counters["found"], counters["no_feed"], counters["written"])
+                     counters["found"], counters["blog_only"], counters["no_feed"])
 
     elapsed = (datetime.now(timezone.utc) - start).total_seconds()
     print()
     print("─" * 72)
-    print(f"  Entities probed          : {len(entities)}")
-    print(f"  Feeds discovered         : {counters['found']}")
-    print(f"  No feed / unreachable    : {counters['no_feed']}")
-    print(f"  Invalid website column   : {counters['invalid_url']}")
+    print(f"  Entities probed              : {len(entities)}")
+    print(f"  Feeds discovered             : {counters['found']}")
+    print(f"    ... via anchor scan        : {counters['found_via_anchor']}")
+    print(f"    ... via feedsearch.dev     : {counters['found_via_feedsearch']}")
+    print(f"  Blog page found (no feed)    : {counters['blog_only']}")
+    print(f"  Nothing usable               : {counters['no_feed']}")
+    print(f"    ... rate-limited           : {counters['rate_limited']}")
+    print(f"    ... rejected product feeds : {counters['rejected_product']}")
+    print(f"  Invalid website column       : {counters['invalid_url']}")
     if args.dry_run:
-        print(f"  Would-write (dry-run)    : {counters['dry_skip_write']}")
+        print(f"  Would-write (dry-run)        : {counters['dry_skip_write']}")
     else:
-        print(f"  New fs_feeds rows written: {counters['written']}")
-        print(f"  Write failures           : {counters['write_failed']}")
+        print(f"  New fs_feeds rows written    : {counters['written']}")
+        print(f"  Write failures               : {counters['write_failed']}")
     hit_rate = (100.0 * counters['found'] / len(entities)) if entities else 0
-    print(f"  Hit rate                 : {hit_rate:.1f}%")
-    print(f"  Elapsed                  : {elapsed:.1f}s")
+    blog_rate = (100.0 * counters['blog_only'] / len(entities)) if entities else 0
+    print(f"  Feed hit rate                : {hit_rate:.1f}%")
+    print(f"  Blog-only rate               : {blog_rate:.1f}%")
+    print(f"  Elapsed                      : {elapsed:.1f}s")
     print("─" * 72)
     return 0
 
@@ -600,6 +952,10 @@ def main() -> None:
                     help="re-probe entities that already have a feed linked "
                          "(default: skip ones already in fs_feed_brands/stores)")
     ap.set_defaults(skip_linked=True)
+    ap.add_argument("--no-feedsearch", dest="use_feedsearch", action="store_false",
+                    help="skip the feedsearch.dev fallback on sites where "
+                         "direct probes find nothing (default: use it)")
+    ap.set_defaults(use_feedsearch=True)
     args = ap.parse_args()
 
     try:
