@@ -962,7 +962,7 @@ async def process_feed(
     log.info("[%s] parsed %d entries", feed.domain, len(entries))
 
     rows: list[ArticleRow] = []
-    extract = feed.extract_body if feed.extract_body is not None else (not feed.paywalled)
+    wants_body = feed.extract_body if feed.extract_body is not None else (not feed.paywalled)
     body_budget = MAX_BODY_FETCH_PER_FEED
 
     for entry in entries:
@@ -974,10 +974,23 @@ async def process_feed(
 
         body: str | None = None
         fallback_image: str | None = None
-        if extract and body_budget > 0:
+
+        # Always fetch the article HTML when:
+        #   - we want the body (non-paywalled feeds), OR
+        #   - we want the body-less og:image fallback (feed didn't include
+        #     an image itself, paywalled or not)
+        # og:image is a public social-sharing meta tag, not paywalled
+        # content — safe to extract even for BoF/WWD/Drapers/etc.
+        entry_image = extract_image(entry)
+        need_article_fetch = wants_body or entry_image is None
+
+        if need_article_fetch and body_budget > 0:
             async with sem:
                 body, fallback_image = await fetch_article_body(client, link)
             body_budget -= 1
+            if not wants_body:
+                # Paywalled feed — keep the og:image, discard the body text.
+                body = None
 
         row = build_row(feed, entry, body, fallback_image=fallback_image)
         if row is None:
