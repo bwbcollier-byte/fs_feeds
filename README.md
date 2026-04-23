@@ -105,7 +105,32 @@ To retire a feed, comment it out. Existing rows from that publisher remain.
 
 ## Scheduling
 
-Run every 30 minutes via cron:
+### GitHub Actions (recommended)
+
+Two workflows are checked in under `.github/workflows/`:
+
+| Workflow | Schedule (UTC) | Script | Purpose |
+|---|---|---|---|
+| `discover.yml` | `0 19 * * *` (daily) | `discover_feeds.py --only both` | Walk `fs_brands` + `fs_stores` for new RSS feeds, register into `fs_feeds` + `fs_feed_{brands,stores}`. Also records blog-only sites into `fs_discovered_blogs`. |
+| `ingest.yml` | `5 */2 * * *` (every 2h) | `fashion_scraper.py --feeds-from-db` | Poll every active feed and upsert articles into `fs_news`. |
+
+Both have `workflow_dispatch` triggers so you can run them manually from the Actions tab with parameter overrides.
+
+Both need two repo secrets set:
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+
+Set them via the UI at `Settings → Secrets and variables → Actions`, or via `gh`:
+```bash
+echo -n "https://YOUR-REF.supabase.co" | gh secret set SUPABASE_URL
+echo -n "YOUR_SERVICE_ROLE_KEY"         | gh secret set SUPABASE_SERVICE_ROLE_KEY
+```
+
+**State persistence**: `ingest.yml` uses `actions/cache@v4` to persist `.scraper_state.sqlite` (ETag + consecutive-failure counter) across runs. Without this, every scheduled run re-fetches every feed fully instead of getting 304s.
+
+### Local cron (alternative)
+
+Run every 30 minutes:
 
 ```cron
 */30 * * * *  cd /path/to/fashion-scraper && /path/to/.venv/bin/python fashion_scraper.py >> scraper.log 2>&1
