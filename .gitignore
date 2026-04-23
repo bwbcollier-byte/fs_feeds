@@ -1,0 +1,13 @@
+.env
+.env.*
+!.env.example
+.scraper_state.sqlite
+.scraper_state.sqlite-journal
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.log
+*.log.*
+/outputs/
+.DS_Store

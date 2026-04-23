@@ -1,0 +1,85 @@
+name: discover-feeds
+
+# Walks fs_brands and fs_stores, probes each website for an RSS/Atom feed,
+# and registers any that validate into fs_feeds + fs_feed_{brands,stores}.
+# Idempotent — re-running won't create duplicate rows (url unique on fs_feeds,
+# composite PK on the link tables). Entities already linked are skipped by
+# default, so this picks up any newly-added brands/stores without re-probing
+# the ones we've already scored.
+
+on:
+  schedule:
+    # 19:00 UTC daily = 06:00 Sydney (AEST), 04:00 Sydney (AEDT).
+    # GitHub Actions cron is always UTC. Change to suit if DST matters.
+    - cron: "0 19 * * *"
+  workflow_dispatch:
+    # Manual trigger. Optional overrides for ad-hoc runs from the Actions UI.
+    inputs:
+      only:
+        description: "Which tables to scan"
+        required: false
+        default: "both"
+        type: choice
+        options: [both, brands, stores]
+      limit:
+        description: "Max entities to probe (0 = no limit)"
+        required: false
+        default: "0"
+        type: string
+      dry_run:
+        description: "Dry run (discover, don't write)"
+        required: false
+        default: false
+        type: boolean
+
+# One discovery run at a time; queue if cron fires while a manual run is in flight.
+concurrency:
+  group: discover-feeds
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    # Full 15k probe is ~2h. Cap at 3h so a stuck host can't burn a whole day.
+    timeout-minutes: 180
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run feed discovery
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          LOG_LEVEL: INFO
+        run: |
+          set -euo pipefail
+          ONLY="${{ github.event.inputs.only || 'both' }}"
+          LIMIT="${{ github.event.inputs.limit || '0' }}"
+          DRY="${{ github.event.inputs.dry_run || 'false' }}"
+          ARGS=(--only "$ONLY")
+          if [[ "$LIMIT" != "0" ]]; then ARGS+=(--limit "$LIMIT"); fi
+          if [[ "$DRY" == "true" ]]; then ARGS+=(--dry-run); fi
+          echo "discover_feeds.py ${ARGS[*]}"
+          python discover_feeds.py "${ARGS[@]}"
+
+      - name: Save run log as artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: discover-log-${{ github.run_id }}
+          path: |
+            *.log
+          if-no-files-found: ignore
+          retention-days: 14

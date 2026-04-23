@@ -1,0 +1,627 @@
+# Fashion news feed sources for the fs_news scraper.
+#
+# Each entry:
+#   url:        RSS/Atom feed URL
+#   name:       human-readable source name (stored in raw_payload.source_name)
+#   domain:     unique publisher domain — used with external_id for dedupe key
+#   category:   industry_news | editorial | streetwear_drops | events | jobs | trade
+#   country:    ISO 3166-1 alpha-2 (US, UK, AU, FR, IT, DE, ES, JP, KR, CN, NZ, GLOBAL)
+#   language:   ISO 639-1 (en, ja, ko, fr, it, de, es, zh)
+#   paywalled:  true if feeds mostly title+summary; scraper will skip full-text fetch
+#   extract_body: override full-text extraction (default true unless paywalled)
+#   user_agent: optional — "browser" to use a Chrome UA (for sites that 403 on bot UAs)
+#
+# Dedupe is on (domain, source_external_id). To retire a feed, comment it out.
+# Feeds marked DISABLED below were confirmed dead/blocked on 2026-04-22 — see the
+# diagnosis comment on each for why. Uncomment to re-probe if you suspect revival.
+
+feeds:
+
+  # ─────────────────────────────────────────────────────────────
+  # INDUSTRY & TRADE — global heavyweights
+  # ─────────────────────────────────────────────────────────────
+  - url: https://www.businessoffashion.com/feed
+    name: Business of Fashion
+    domain: businessoffashion.com
+    category: industry_news
+    country: GLOBAL
+    language: en
+    paywalled: true
+
+  - url: https://wwd.com/feed/
+    name: WWD
+    domain: wwd.com
+    category: industry_news
+    country: US
+    language: en
+    paywalled: true
+
+  - url: https://wwd.com/fashion-news/feed/
+    name: WWD Fashion News
+    domain: wwd.com
+    category: industry_news
+    country: US
+    language: en
+    paywalled: true
+
+  - url: https://us.fashionnetwork.com/rss/feed/us,1.xml
+    name: FashionNetwork US
+    domain: fashionnetwork.com
+    category: industry_news
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://au.fashionnetwork.com/rss/feed/au,1.xml
+    name: FashionNetwork AU
+    domain: fashionnetwork.com
+    category: industry_news
+    country: AU
+    language: en
+    paywalled: false
+
+  - url: https://fashionunited.info/rss-news
+    name: FashionUnited
+    domain: fashionunited.com
+    category: industry_news
+    country: GLOBAL
+    language: en
+    paywalled: false
+
+  # DISABLED 2026-04-22 — FashionUnited has no per-category feeds (404).
+  # The main `fashionunited.com/rss-news` feed (above) already covers
+  # business + retail content.
+  # - url: https://fashionunited.com/news/business/feed
+  #   name: FashionUnited Business
+  #   domain: fashionunited.com
+  #   category: industry_news
+  #   country: GLOBAL
+  #   language: en
+  #   paywalled: false
+  #
+  # - url: https://fashionunited.com/news/retail/feed
+  #   name: FashionUnited Retail
+  #   domain: fashionunited.com
+  #   category: industry_news
+  #   country: GLOBAL
+  #   language: en
+  #   paywalled: false
+
+  # DISABLED 2026-04-22 — Vogue Business has no public RSS (404/503 on all
+  # common paths). No alternative found.
+  # - url: https://www.voguebusiness.com/feed
+  #   name: Vogue Business
+  #   domain: voguebusiness.com
+  #   category: industry_news
+  #   country: GLOBAL
+  #   language: en
+  #   paywalled: false
+
+  - url: https://www.glossy.co/feed
+    name: Glossy
+    domain: glossy.co
+    category: industry_news
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.retaildive.com/feeds/news/
+    name: Retail Dive
+    domain: retaildive.com
+    category: industry_news
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.luxurydaily.com/feed/
+    name: Luxury Daily
+    domain: luxurydaily.com
+    category: industry_news
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://theimpression.com/feed/
+    name: The Impression
+    domain: theimpression.com
+    category: industry_news
+    country: US
+    language: en
+    paywalled: false
+
+  # Trade — UK / EU / JP / CN
+  - url: https://www.drapersonline.com/feed
+    name: Drapers
+    domain: drapersonline.com
+    category: trade
+    country: UK
+    language: en
+    paywalled: true
+
+  # URL updated 2026-04-22: /feed-pambianconews/ now serves the site
+  # landing page (HTML, 200). /feed/ is the working RSS (19 items).
+  - url: https://www.pambianconews.com/feed/
+    name: Pambianco News
+    domain: pambianconews.com
+    category: trade
+    country: IT
+    language: it
+    paywalled: false
+
+  - url: https://www.textilwirtschaft.de/feed
+    name: TextilWirtschaft
+    domain: textilwirtschaft.de
+    category: trade
+    country: DE
+    language: de
+    paywalled: true  # UNVERIFIED path — TextilWirtschaft lists feeds at /service/rss-feeds/
+
+  # DISABLED 2026-04-22 — Jing Daily migrated to Next.js and dropped RSS.
+  # No alt path (tried /rss, /rss.xml, /feed, /feed.xml, /atom.xml, /posts.rss).
+  # - url: https://jingdaily.com/feed/
+  #   name: Jing Daily
+  #   domain: jingdaily.com
+  #   category: trade
+  #   country: CN
+  #   language: en
+  #   paywalled: false
+
+  - url: https://insideretail.com.au/feed
+    name: Inside Retail AU
+    domain: insideretail.com.au
+    category: trade
+    country: AU
+    language: en
+    paywalled: false
+
+  # ─────────────────────────────────────────────────────────────
+  # EDITORIAL — US / UK / global
+  # ─────────────────────────────────────────────────────────────
+  - url: https://www.vogue.com/feed/rss
+    name: Vogue US
+    domain: vogue.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  # DISABLED 2026-04-22 — Condé Nast killed section-level feeds; only
+  # /feed/rss survives (already present as "Vogue US" above, which
+  # includes some runway coverage).
+  # - url: https://www.vogue.com/fashion/runway/rss
+  #   name: Vogue Runway
+  #   domain: vogue.com
+  #   category: events
+  #   country: GLOBAL
+  #   language: en
+  #   paywalled: false
+
+  - url: https://www.harpersbazaar.com/rss/all.xml/
+    name: Harper's Bazaar US
+    domain: harpersbazaar.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.elle.com/rss/all.xml/
+    name: Elle US
+    domain: elle.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.gq.com/feed/rss
+    name: GQ
+    domain: gq.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.esquire.com/rss/all.xml/
+    name: Esquire
+    domain: esquire.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  # DISABLED 2026-04-22 — rss.xml and /rss/index.xml, /feeds/rss/all.xml
+  # all 404. Vox Media dropped RSS from The Cut.
+  # - url: https://www.thecut.com/rss.xml
+  #   name: The Cut
+  #   domain: thecut.com
+  #   category: editorial
+  #   country: US
+  #   language: en
+  #   paywalled: false
+
+  - url: https://www.refinery29.com/rss.xml
+    name: Refinery29
+    domain: refinery29.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.dazeddigital.com/rss
+    name: Dazed
+    domain: dazeddigital.com
+    category: editorial
+    country: UK
+    language: en
+    paywalled: false
+
+  - url: https://i-d.co/feed
+    name: i-D
+    domain: i-d.co
+    category: editorial
+    country: UK
+    language: en
+    paywalled: false
+
+  - url: https://fashionista.com/.rss/excerpt/
+    name: Fashionista
+    domain: fashionista.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.thefashionspot.com/feed/
+    name: theFashionSpot
+    domain: thefashionspot.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.fashiongonerogue.com/feed/
+    name: Fashion Gone Rogue
+    domain: fashiongonerogue.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  # DISABLED 2026-04-22 — 403 with both bot and browser UAs (Cloudflare
+  # challenge). Would require a headless browser to access.
+  # - url: https://www.thefashionisto.com/feed/
+  #   name: The Fashionisto
+  #   domain: thefashionisto.com
+  #   category: editorial
+  #   country: US
+  #   language: en
+  #   paywalled: false
+
+  - url: https://www.whowhatwear.com/rss
+    name: Who What Wear US
+    domain: whowhatwear.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  # DISABLED 2026-04-22 — the UK feed URL 301-redirects to
+  # whowhatwear.com/feeds.xml (identical to Who What Wear US). Every
+  # item link points to whowhatwear.com/..., which collides with the
+  # already-written US rows on uq_news_source_url. Nothing to ingest
+  # that isn't already coming in via the US feed.
+  # - url: https://www.whowhatwear.co.uk/rss
+  #   name: Who What Wear UK
+  #   domain: whowhatwear.co.uk
+  #   category: editorial
+  #   country: UK
+  #   language: en
+  #   paywalled: false
+
+  # DISABLED 2026-04-22 — 404 on /feed, /feed/, /rss, /rss.xml, /atom.xml,
+  # /latest/feed/. Site has no RSS.
+  # - url: https://www.thegentlemansjournal.com/feed/
+  #   name: The Gentleman's Journal
+  #   domain: thegentlemansjournal.com
+  #   category: editorial
+  #   country: UK
+  #   language: en
+  #   paywalled: false
+
+  - url: https://coolhunting.com/feed/
+    name: COOL HUNTING
+    domain: coolhunting.com
+    category: editorial
+    country: US
+    language: en
+    paywalled: false
+
+  # ─────────────────────────────────────────────────────────────
+  # EUROPE — FR / IT / ES / DE
+  # ─────────────────────────────────────────────────────────────
+  - url: https://www.vogue.fr/feed/rss
+    name: Vogue France
+    domain: vogue.fr
+    category: editorial
+    country: FR
+    language: fr
+    paywalled: false
+
+  - url: https://www.numero.com/en/feed
+    name: Numéro
+    domain: numero.com
+    category: editorial
+    country: FR
+    language: en
+    paywalled: false
+
+  # URL updated 2026-04-22: /feed → /feed/rss (old path now 404s).
+  - url: https://www.vogue.it/feed/rss
+    name: Vogue Italia
+    domain: vogue.it
+    category: editorial
+    country: IT
+    language: it
+    paywalled: false
+
+  # URL updated 2026-04-22: Elle.com/es dropped section-scoped feeds;
+  # /es/rss/all.xml/ now serves site-wide ES posts (50 items).
+  - url: https://www.elle.com/es/rss/all.xml/
+    name: Elle España
+    domain: elle.com
+    category: editorial
+    country: ES
+    language: es
+    paywalled: false
+
+  - url: https://www.neo2.com/feed/
+    name: Neo2
+    domain: neo2.com
+    category: editorial
+    country: ES
+    language: es
+    paywalled: false
+
+  # URL updated 2026-04-22: /feed → /feed/rss (old path now 404s).
+  - url: https://www.vogue.de/feed/rss
+    name: Vogue Germany
+    domain: vogue.de
+    category: editorial
+    country: DE
+    language: de
+    paywalled: false
+
+  - url: https://www.modepilot.de/feed/
+    name: ModePilot
+    domain: modepilot.de
+    category: editorial
+    country: DE
+    language: de
+    paywalled: false
+
+  # ─────────────────────────────────────────────────────────────
+  # ASIA — JP / KR / CN
+  # ─────────────────────────────────────────────────────────────
+  # DISABLED 2026-04-22 — CloudFront returns 403 for all UAs (incl.
+  # googlebot). Would require a headless browser.
+  # - url: https://www.wwdjapan.com/feed
+  #   name: WWD Japan
+  #   domain: wwdjapan.com
+  #   category: industry_news
+  #   country: JP
+  #   language: ja
+  #   paywalled: false
+
+  - url: https://www.fashionsnap.com/rss.xml
+    name: Fashionsnap
+    domain: fashionsnap.com
+    category: editorial
+    country: JP
+    language: ja
+    paywalled: false
+
+  # ─────────────────────────────────────────────────────────────
+  # AUSTRALIA / NEW ZEALAND
+  # ─────────────────────────────────────────────────────────────
+  - url: https://fashionjournal.com.au/feed
+    name: Fashion Journal
+    domain: fashionjournal.com.au
+    category: editorial
+    country: AU
+    language: en
+    paywalled: false
+
+  - url: https://harpersbazaar.com.au/feed
+    name: Harper's Bazaar AU
+    domain: harpersbazaar.com.au
+    category: editorial
+    country: AU
+    language: en
+    paywalled: false
+
+  - url: https://grazia.com.au/feed
+    name: Grazia AU
+    domain: grazia.com.au
+    category: editorial
+    country: AU
+    language: en
+    paywalled: false
+
+  - url: https://russh.com/category/fashion/feed
+    name: Russh
+    domain: russh.com
+    category: editorial
+    country: AU
+    language: en
+    paywalled: false
+
+  - url: https://www.marieclaire.com.au/feed
+    name: Marie Claire AU
+    domain: marieclaire.com.au
+    category: editorial
+    country: AU
+    language: en
+    paywalled: false
+
+  # DISABLED 2026-04-22 — Broadsheet has no RSS at any probed path
+  # (/style/feed, /feed, /feed/, /rss, /rss/all, /melbourne/style/feed,
+  # /sydney/style/feed all 404).
+  # - url: https://www.broadsheet.com.au/style/feed
+  #   name: Broadsheet Style
+  #   domain: broadsheet.com.au
+  #   category: editorial
+  #   country: AU
+  #   language: en
+  #   paywalled: false
+
+  # DISABLED 2026-04-22 — FQ dropped RSS; only a WP-JSON endpoint remains
+  # (/wp-json/wp/v2/posts). Would require a separate ingester, not RSS.
+  # - url: https://fq.co.nz/feed
+  #   name: Fashion Quarterly NZ
+  #   domain: fq.co.nz
+  #   category: editorial
+  #   country: NZ
+  #   language: en
+  #   paywalled: false
+
+  # ─────────────────────────────────────────────────────────────
+  # STREETWEAR / SNEAKERS / DROPS
+  # ─────────────────────────────────────────────────────────────
+  - url: https://hypebeast.com/fashion/feed
+    name: Hypebeast Fashion
+    domain: hypebeast.com
+    category: streetwear_drops
+    country: GLOBAL
+    language: en
+    paywalled: false
+
+  - url: https://hypebeast.com/footwear/feed
+    name: Hypebeast Footwear
+    domain: hypebeast.com
+    category: streetwear_drops
+    country: GLOBAL
+    language: en
+    paywalled: false
+
+  - url: https://hypebae.com/feed
+    name: Hypebae
+    domain: hypebae.com
+    category: streetwear_drops
+    country: GLOBAL
+    language: en
+    paywalled: false
+
+  - url: https://www.highsnobiety.com/feeds/rss
+    name: Highsnobiety
+    domain: highsnobiety.com
+    category: streetwear_drops
+    country: GLOBAL
+    language: en
+    paywalled: false
+
+  # DISABLED 2026-04-22 — 403 on all UAs (S3 origin blocks). Main
+  # Highsnobiety feed (above) is the only working endpoint.
+  # - url: https://www.highsnobiety.com/feeds/rss/style
+  #   name: Highsnobiety Style
+  #   domain: highsnobiety.com
+  #   category: streetwear_drops
+  #   country: GLOBAL
+  #   language: en
+  #   paywalled: false
+
+  # DISABLED 2026-04-22 — Complex has no public RSS anywhere
+  # (tried /feeds/rss/channel/style, /feeds/rss, /rss, /style/feed,
+  # /sneakers/feed — all 403/404).
+  # - url: https://www.complex.com/feeds/rss/channel/style
+  #   name: Complex Style
+  #   domain: complex.com
+  #   category: streetwear_drops
+  #   country: US
+  #   language: en
+  #   paywalled: false
+  #
+  # - url: https://www.complex.com/feeds/rss/channel/sneakers
+  #   name: Complex Sneakers
+  #   domain: complex.com
+  #   category: streetwear_drops
+  #   country: US
+  #   language: en
+  #   paywalled: false
+
+  # user_agent: browser — Sneaker News blocks bot-shaped UAs with 403 but
+  # serves the feed fine with a Chrome UA.
+  - url: https://sneakernews.com/feed/
+    name: Sneaker News
+    domain: sneakernews.com
+    category: streetwear_drops
+    country: US
+    language: en
+    paywalled: false
+    user_agent: browser
+
+  - url: https://www.sneakerfiles.com/feed
+    name: Sneaker Files
+    domain: sneakerfiles.com
+    category: streetwear_drops
+    country: US
+    language: en
+    paywalled: false
+
+  # DISABLED 2026-04-22 — site has no RSS anywhere
+  # (/feed, /feed/, /rss, /feed.xml, /news.rss, /news/feed, /latest/feed,
+  # /index.xml — all 404).
+  # - url: https://www.sneakerfreaker.com/feed
+  #   name: Sneaker Freaker
+  #   domain: sneakerfreaker.com
+  #   category: streetwear_drops
+  #   country: AU
+  #   language: en
+  #   paywalled: false
+
+  - url: https://sneakerbardetroit.com/feed/
+    name: Sneaker Bar Detroit
+    domain: sneakerbardetroit.com
+    category: streetwear_drops
+    country: US
+    language: en
+    paywalled: false
+
+  - url: https://www.nicekicks.com/feed
+    name: Nice Kicks
+    domain: nicekicks.com
+    category: streetwear_drops
+    country: US
+    language: en
+    paywalled: false
+
+  # ─────────────────────────────────────────────────────────────
+  # EVENTS / RUNWAY
+  # ─────────────────────────────────────────────────────────────
+  - url: https://fashionweekdaily.com/feed/
+    name: Fashion Week Daily
+    domain: fashionweekdaily.com
+    category: events
+    country: GLOBAL
+    language: en
+    paywalled: false
+
+  - url: https://fashionweekonline.com/feed
+    name: Fashion Week Online
+    domain: fashionweekonline.com
+    category: events
+    country: GLOBAL
+    language: en
+    paywalled: false
+
+  # ─────────────────────────────────────────────────────────────
+  # BRAND / PR WIRE
+  # ─────────────────────────────────────────────────────────────
+  # DISABLED 2026-04-22 — PR Newswire retired the fashion-specific feed
+  # (404). Their /rss/all-news-releases-list.rss works but covers every
+  # industry — too noisy for fashion ingest.
+  # - url: https://www.prnewswire.com/rss/consumer-products-retail-latest-news/fashion-list-rss.rss
+  #   name: PR Newswire Fashion
+  #   domain: prnewswire.com
+  #   category: industry_news
+  #   country: GLOBAL
+  #   language: en
+  #   paywalled: false
