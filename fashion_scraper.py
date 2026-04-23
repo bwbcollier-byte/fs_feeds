@@ -568,6 +568,8 @@ _UNIQUE_VIOLATION_HINTS = (
     "duplicate key value",
     "unique constraint",
     "23505",  # Postgres unique_violation SQLSTATE
+    "21000",  # cardinality_violation — two rows with same ON CONFLICT key in one batch
+    "cannot affect row a second time",
 )
 
 
@@ -607,9 +609,27 @@ def upsert_rows(client: Client, rows: list[ArticleRow]) -> tuple[int, int]:
     if not rows:
         return 0, 0
 
+    # Within-batch dedup by the ON CONFLICT key. Postgres rejects the entire
+    # batch (SQLSTATE 21000 "ON CONFLICT DO UPDATE command cannot affect row
+    # a second time") if any two rows in a single upsert share
+    # (source_domain, source_external_id). Collapse duplicates here so the
+    # batch is always legal. Last occurrence wins — typically the most recent
+    # fetch of the same URL.
+    by_key: dict[tuple[str, str], ArticleRow] = {}
+    for r in rows:
+        by_key[(r.source_domain, r.source_external_id)] = r
+    deduped = list(by_key.values())
+    dropped_in_batch = len(rows) - len(deduped)
+    if dropped_in_batch:
+        log.info(
+            "within-batch dedup: collapsed %d duplicate (source_domain, source_external_id) pairs",
+            dropped_in_batch,
+        )
+    rows = deduped
+
     payload = [asdict(r) for r in rows]
     written = 0
-    skipped = 0
+    skipped = dropped_in_batch
 
     for chunk_start in range(0, len(payload), UPSERT_CHUNK_SIZE):
         chunk = payload[chunk_start : chunk_start + UPSERT_CHUNK_SIZE]
