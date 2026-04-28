@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import subprocess
 import hashlib
 import json
 import logging
@@ -64,7 +65,7 @@ from urllib.parse import urlparse
 
 import feedparser  # type: ignore
 import httpx
-import trafilatura  # type: ignore
+import trafilatura  # type: ignore  # also called in subprocess for crash isolation
 import yaml  # type: ignore
 from dotenv import load_dotenv
 from supabase import Client, create_client  # type: ignore
@@ -390,6 +391,57 @@ _LINK_IMAGE_SRC_RX = re.compile(
 )
 
 
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Crash-safe trafilatura wrapper
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _trafilatura_extract_safe(html: str) -> str | None:
+    """
+    Run trafilatura.extract in a fresh subprocess.
+
+    lxml (which trafilatura uses internally) can trigger C-level heap
+    corruption ("double free or corruption") on certain HTML documents,
+    killing the entire Python process with SIGABRT (exit 134). Running in
+    a subprocess means the crash only affects that one call — the parent
+    process catches the non-zero exit and returns None instead of dying.
+    """
+    try:
+        proc = subprocess.run(
+            [
+                sys.executable, "-c",
+                (
+                    "import sys, trafilatura; "
+                    "html = sys.stdin.buffer.read().decode('utf-8', 'replace'); "
+                    "result = trafilatura.extract("
+                    "    html,"
+                    "    include_comments=False,"
+                    "    include_tables=False,"
+                    "    favor_precision=True,"
+                    "); "
+                    "sys.stdout.write(result or '')"
+                ),
+            ],
+            input=html.encode("utf-8", "replace"),
+            capture_output=True,
+            timeout=45,
+        )
+        if proc.returncode != 0:
+            # Log stderr snippet for debugging without crashing the parent
+            err = proc.stderr.decode("utf-8", "replace")[:200].strip()
+            if err:
+                log.debug("trafilatura subprocess exit %d: %s", proc.returncode, err)
+            return None
+        out = proc.stdout.decode("utf-8", "replace").strip()
+        return out or None
+    except subprocess.TimeoutExpired:
+        log.debug("trafilatura subprocess timed out")
+        return None
+    except Exception as exc:  # noqa: BLE001
+        log.debug("trafilatura subprocess error: %s", exc)
+        return None
+
+
 def extract_image_from_html(html: str) -> str | None:
     """Pull a cover image from a fetched article HTML body.
 
@@ -420,15 +472,10 @@ async def fetch_article_body(
         html = r.text
         # Grab the OG image off the raw HTML before trafilatura strips it.
         image = extract_image_from_html(html)
-        # trafilatura.extract is CPU-bound; offload so it doesn't block
-        # the event loop while other feed fetches are pending.
-        body = await asyncio.to_thread(
-            trafilatura.extract,
-            html,
-            include_comments=False,
-            include_tables=False,
-            favor_precision=True,
-        )
+        # trafilatura.extract is CPU-bound and can trigger C-level heap
+        # corruption (SIGABRT / exit 134) on certain HTML. Run it in a
+        # subprocess so a crash kills only that call, not the whole runner.
+        body = await asyncio.to_thread(_trafilatura_extract_safe, html)
         body = truncate(body, MAX_BODY_CHARS) if body else None
         return body, image
     except Exception as e:  # noqa: BLE001
