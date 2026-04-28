@@ -117,7 +117,14 @@ jobs:
           fi
 
           echo "▶ python fashion_scraper.py ${ARGS[*]}"
-          python fashion_scraper.py "${ARGS[@]}"
+          python fashion_scraper.py "${ARGS[@]}" || {
+            code=$?
+            if [[ $code -eq 1 ]]; then
+              echo "⚠ exit 1: some feeds failed (403/500/network — normal). Continuing."
+            else
+              echo "✗ exit $code: critical failure"; exit $code
+            fi
+          }
 
       - name: Save scraper state
         if: always()
